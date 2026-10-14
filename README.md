@@ -6,23 +6,22 @@ Licensed under the [MIT License](LICENSE).
 
 ## GitHub checkout and CI
 
-Clone the repositories into the same parent directory so Forge's sibling path
-dependencies resolve (finance-crypto is test-only for finance-codec integration):
+finance-core is pinned to registry version 0.1.0; no sibling checkout is needed:
 
 ```sh
-git clone https://github.com/march-finance/finance-core.git
 git clone https://github.com/march-finance/finance-ledger.git
 cd finance-ledger
+forge deps
 forge test --seed=42
 ```
 
 GitHub Actions runs on pushes, pull requests and manual dispatches. It installs
 the pinned March 0.5.0 release, checks/builds this package, and runs debug/release
-tests and properties. Dependencies are checked out from their `main` branches.
+tests and properties. finance-core is installed from ForgePM using `forge.lock`.
 Compile-time contract checks run with Z3.
 
-Exact, immutable double-entry accounting for March, with a local Forge path
-dependency on the sibling `finance-core` project.
+Exact, immutable double-entry accounting for March, depending on the published
+`finance-core` 0.1.0 package.
 
 March 0.5.0 is pinned in `.march-version`. Install it with
 `forge toolchain install v0.5.0`; confirm resolution with `forge toolchain which`.
