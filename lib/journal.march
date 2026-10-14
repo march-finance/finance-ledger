@@ -1,32 +1,76 @@
+-- LedgerJournal — Pure immutable journal with a fixed chart, exact balances, idempotent
+-- posting and linked compensating reversals. Callers must serialize writers and atomically
+-- persist returned successors; no database, access control or tamper resistance is
+-- provided.
+--
+-- Usage and tested examples: docs/guide.md and test/docs_quickstart_test.march.
+
 mod LedgerJournal do
+  -- Opaque validated draft plus optional original-entry ID for a reversal. Constructed only
+  -- through journal operations; not a universal authorization or unique journal identity.
   opaque type PostedEntry = PostedValue(LedgerEntry.Draft, Option(String))
+  -- Opaque immutable account chart and ordered posted entries. All posting operations return
+  -- new values; old journals remain unchanged. Negative balances are permitted.
   opaque type Ledger = LedgerValue(List(LedgerAccount.Account), List(PostedEntry))
 
+  doc """
+  Construct an empty journal from accounts; DuplicateAccount for repeated IDs anywhere in
+  the chart. Empty chart is allowed. Chart cannot be extended in 0.1.0; no opening
+  balances are inferred.
+  """
   fn new(accounts : List(LedgerAccount.Account)) : Result(Ledger, LedgerError.Error) do
     if !LedgerAccount.unique_ids(accounts) do Err(LedgerError.DuplicateAccount)
     else Ok(LedgerValue(accounts, Nil)) end
   end
+  doc """
+  Return l's posted entries in append order, including reversals. Infallible; no entries
+  are hidden, collapsed or removed.
+  """
   fn entries(l : Ledger) : List(PostedEntry) do
     match l do LedgerValue(_, es) -> es end
   end
+  doc """
+  Return l's fixed account chart in supplied order. Infallible; returning this list does
+  not permit changing l's chart.
+  """
   fn accounts(l : Ledger) : List(LedgerAccount.Account) do
     match l do LedgerValue(accts, _) -> accts end
   end
+  doc """
+  Return number of posted entries, refined nonnegative. Includes compensating entries;
+  exact retries do not increase it. Infallible for valid journals.
+  """
   fn count(l : Ledger) : {Int | _ >= 0} do
     let n = List.length(entries(l))
     if n < 0 do panic("invalid journal length") else n end
   end
+  doc """
+  Return p's authoritative stored entry ID. Infallible. On replay it may differ from the
+  new draft's requested ID.
+  """
   fn entry_id(p : PostedEntry) : String do
     match p do PostedValue(d, _) -> LedgerEntry.id(d) end
   end
+  doc """
+  Return p's immutable posted draft, including ordered postings and provenance.
+  Infallible; manipulating a derived draft never edits posted history.
+  """
   fn draft(p : PostedEntry) : LedgerEntry.Draft do
     match p do PostedValue(d, _) -> d end
   end
+  doc """
+  Return Some(original entry ID) for a compensating entry, otherwise None. Infallible; the
+  original entry remains in history.
+  """
   fn reversal_of(p : PostedEntry) : Option(String) do
     match p do PostedValue(_, link) -> link end
   end
 
-  doc "Check accounting invariants without posting or reserving replay keys."
+  doc """
+  Validate d against l's chart without appending or reserving keys. Return
+  LedgerValidation.Validated or chart/account/balance errors; does not check current
+  replay conflicts. Use post_validated to commit a validated draft.
+  """
   fn validate(l : Ledger, d : LedgerEntry.Draft) : Result(LedgerValidation.Validated, LedgerError.Error) do
     LedgerValidation.validate(accounts(l), d)
   end
@@ -53,13 +97,30 @@ mod LedgerJournal do
     end
   end
 
+  doc """
+  Validate and append d, returning (new journal, posted entry), or return the original
+  journal/entry for an exact retry. Match by entry ID OR (source, external ID);
+  conflicting content/links or matches to two records yield ReplayConflict. New entries
+  propagate validation errors. No input mutation or durable transaction occurs.
+  """
   fn post(l : Ledger, d : LedgerEntry.Draft) : Result((Ledger, PostedEntry), LedgerError.Error) do append(l, d, None) end
 
-  doc "Post a validated draft, rechecking destination accounts and current replay keys."
+  doc """
+  Post v's immutable draft with current destination chart and replay checks, returning
+  (new journal, posted entry). Validated is not a reservation: chart validation errors or
+  ReplayConflict can still occur. Exact retries return existing history; no mutation
+  occurs.
+  """
   fn post_validated(l : Ledger, v : LedgerValidation.Validated) : Result((Ledger, PostedEntry), LedgerError.Error) do
     append(l, LedgerValidation.draft(v), None)
   end
 
+  doc """
+  Return exact Quantity for account id, summing debits minus credits over all history.
+  UnknownAccount if id is absent; unused accounts return zero. Sign is NOT adjusted for
+  account kind; income/equity/liability may be negative. No funds check or valuation
+  occurs.
+  """
   fn balance(l : Ledger, id : String) : Result(FinanceAmount.Quantity, LedgerError.Error) do
     match List.find(accounts(l), fn a -> LedgerAccount.id(a) == id) do
       None -> Err(LedgerError.UnknownAccount)
@@ -71,6 +132,13 @@ mod LedgerJournal do
     end
   end
 
+  doc """
+  Append opposite postings for original with new id/metadata and a reversal_of link;
+  return (new journal, reversal). UnknownEntry for missing/mismatched original;
+  AlreadyReversed for a different second reversal. Exact retry of the same reversal
+  ID/content returns existing history. Propagate InvalidId, ReplayConflict or validation
+  errors. Reversals themselves can be reversed; originals never mutate.
+  """
   fn reverse(l : Ledger, original : PostedEntry, id : String, metadata : FinanceMetadata.Metadata) : Result((Ledger, PostedEntry), LedgerError.Error) do
     match List.find(entries(l), fn p -> entry_id(p) == entry_id(original)) do
       None -> Err(LedgerError.UnknownEntry)

@@ -1,3 +1,13 @@
+-- LedgerError — Structured ledger constructor, validation, replay and reversal errors.
+-- Failures return no replacement journal; retain the last successful immutable value.
+--
+-- Usage and tested examples: docs/guide.md and test/docs_quickstart_test.march.
+
 mod LedgerError do
+  -- InvalidId: malformed ID; DuplicateAccount: repeated chart ID;
+  -- UnknownAccount/AssetMismatch: invalid destination; InvalidAmount: nonpositive posting;
+  -- EmptyEntry: fewer than two postings; Unbalanced: per-asset conservation failure;
+  -- ReplayConflict: conflicting event/entry keys; UnknownEntry: absent/mismatched reversal
+  -- target; AlreadyReversed: second different reversal.
   type Error = InvalidId | DuplicateAccount | UnknownAccount | AssetMismatch | InvalidAmount | EmptyEntry | Unbalanced | ReplayConflict | UnknownEntry | AlreadyReversed
 end

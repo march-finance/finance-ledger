@@ -1,29 +1,64 @@
+-- LedgerEntry — Immutable draft and positive-posting construction. Drafts may be
+-- incomplete or unbalanced until LedgerValidation checks them against a chart. These
+-- functions never append journal history.
+--
+-- Usage and tested examples: docs/guide.md and test/docs_quickstart_test.march.
+
 mod LedgerEntry do
+  -- Debit contributes positive signed atoms; Credit contributes negative signed atoms.
+  -- Posting quantities themselves must be strictly positive.
   type Direction = Debit | Credit
   derive Eq for Direction
+  -- Opaque account ID, direction and strictly positive exact Quantity. Construction does not
+  -- check membership in a journal.
   opaque type Posting = PostingValue(String, Direction, FinanceAmount.Quantity)
+  -- Opaque valid entry ID, provenance and ordered postings. Empty drafts are allowed; a
+  -- draft is not a Validated or PostedEntry.
   opaque type Draft = DraftValue(String, FinanceMetadata.Metadata, List(Posting))
 
+  doc """
+  Construct a posting to account with direction and quantity. InvalidId for invalid
+  account ID; InvalidAmount for zero/negative atoms. Does not validate chart membership or
+  asset agreement. Example: posting("cash", Debit, positiveUsd).
+  """
   fn posting(account : String, direction : Direction, quantity : FinanceAmount.Quantity) : Result(Posting, LedgerError.Error) do
     if !LedgerAccount.valid_id(account) do Err(LedgerError.InvalidId)
     else if BigInt.compare(FinanceAmount.atoms(quantity), BigInt.zero()) <= 0 do Err(LedgerError.InvalidAmount)
     else Ok(PostingValue(account, direction, quantity)) end end
   end
+  doc """
+  Return p's destination account ID. Infallible; does not retrieve its chart definition.
+  """
   fn account(p : Posting) : String do
     match p do PostingValue(id, _, _) -> id end
   end
+  doc """
+  Return p's Debit or Credit direction. Infallible; use signed_atoms for algebraic totals.
+  """
   fn direction(p : Posting) : Direction do
     match p do PostingValue(_, d, _) -> d end
   end
+  doc """
+  Return p's strictly positive exact Quantity. Infallible; credit direction does not
+  negate this stored amount.
+  """
   fn quantity(p : Posting) : FinanceAmount.Quantity do
     match p do PostingValue(_, _, q) -> q end
   end
+  doc """
+  Return quantity atoms for Debit, negated atoms for Credit. Infallible; values from
+  different assets must never be summed as one balance.
+  """
   fn signed_atoms(p : Posting) : BigInt.BigInt do
     match direction(p) do
       Debit -> FinanceAmount.atoms(quantity(p))
       Credit -> BigInt.negate(FinanceAmount.atoms(quantity(p)))
     end
   end
+  doc """
+  Return p with Debit/Credit swapped, preserving account and positive quantity.
+  Infallible; does not append an entry or link a reversal.
+  """
   fn opposite(p : Posting) : Posting do
     let id = account(p)
     let d = direction(p)
@@ -34,25 +69,51 @@ mod LedgerEntry do
     end
     PostingValue(id, opposite, q)
   end
+  doc """
+  Construct an empty draft with id and validated metadata. InvalidId for an empty ID or
+  characters <= ASCII space. Example: draft("opening-1", metadata). Use add before
+  validating/posting.
+  """
   fn draft(id : String, metadata : FinanceMetadata.Metadata) : Result(Draft, LedgerError.Error) do
     if LedgerAccount.valid_id(id) do Ok(DraftValue(id, metadata, Nil)) else Err(LedgerError.InvalidId) end
   end
+  doc """
+  Return a new draft with p appended after existing postings. Infallible and
+  order-preserving; input draft is unchanged. Does not balance or validate the entry.
+  """
   fn add(d : Draft, p : Posting) : Draft do
     let id = id(d)
     let m = metadata(d)
     let ps = postings(d)
     DraftValue(id, m, List.append(ps, [p]))
   end
+  doc """
+  Return d's requested entry ID. Infallible; an idempotent journal retry can return an
+  older authoritative posted ID.
+  """
   fn id(d : Draft) : String do
     match d do DraftValue(id, _, _) -> id end
   end
+  doc """
+  Return d's immutable source/timestamps/external ID. Infallible; preserve these values,
+  including recorded time, across retries.
+  """
   fn metadata(d : Draft) : FinanceMetadata.Metadata do
     match d do DraftValue(_, m, _) -> m end
   end
+  doc """
+  Return d's postings in insertion order. Infallible; ordering is included in replay
+  comparison.
+  """
   fn postings(d : Draft) : List(Posting) do
     match d do DraftValue(_, _, ps) -> ps end
   end
 
+  doc """
+  Compare financial draft content: all metadata, posting order, account IDs, directions,
+  asset identities/precision and atoms. Deliberately ignores draft ID so event retries can
+  resolve to an older ID; reversal links are compared separately by the journal.
+  """
   fn same(a : Draft, b : Draft) : Bool do
     let ma = metadata(a)
     let mb = metadata(b)

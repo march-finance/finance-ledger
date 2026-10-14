@@ -1,27 +1,66 @@
+-- LedgerAccount — Opaque account definitions: classification is separate from asset
+-- identity. Each account holds one asset and precision. Charts require globally unique
+-- IDs; custody/location is modeled by distinct accounts, not new classifications.
+--
+-- Usage and tested examples: docs/guide.md and test/docs_quickstart_test.march.
+
 mod LedgerAccount do
+  -- Accounting classification only: AssetAccount, LiabilityAccount, EquityAccount,
+  -- IncomeAccount or ExpenseAccount. Does not change the journal's debit-minus-credit
+  -- balance sign.
   type Kind = AssetAccount | LiabilityAccount | EquityAccount | IncomeAccount | ExpenseAccount
+  -- Opaque validated ID, Kind and FinanceAsset.Asset. Does not hold a balance or authorize
+  -- posting; journals own history and chart membership.
   opaque type Account = AccountValue(String, Kind, FinanceAsset.Asset)
 
+  doc """
+  Return whether id is nonempty with no characters <= ASCII space. Pure shared predicate
+  for account and entry IDs; does not enforce uniqueness.
+  """
   fn valid_id(id : String) : Bool do
     !String.is_empty(id) && !List.any(string_chars(id), fn c -> c <= " ")
   end
 
+  doc """
+  Construct an account with id, kind and validated asset. InvalidId for empty ID or
+  characters <= ASCII space. Does not check uniqueness; LedgerJournal.new does that.
+  Example: make("cash", AssetAccount, usd).
+  """
   fn make(id : String, kind : Kind, asset : FinanceAsset.Asset) : Result(Account, LedgerError.Error) do
     if valid_id(id) do Ok(AccountValue(id, kind, asset)) else Err(LedgerError.InvalidId) end
   end
+  doc """
+  Return a's stored account ID. Infallible; equality of IDs alone does not prove
+  consistent kind/asset definitions.
+  """
   fn id(a : Account) : String do
     match a do AccountValue(id, _, _) -> id end
   end
+  doc """
+  Return a's classification. Infallible; classification does not alter balance sign or
+  enforce available funds.
+  """
   fn kind(a : Account) : Kind do
     match a do AccountValue(_, kind, _) -> kind end
   end
+  doc """
+  Return a's declared asset including precision. Infallible; postings must match both
+  identity and precision.
+  """
   fn asset(a : Account) : FinanceAsset.Asset do
     match a do AccountValue(_, _, asset) -> asset end
   end
+  doc """
+  Return true only when a and b have identical asset IDs AND precision. Pure; never
+  compares tickers, exchange rates or economic equivalence.
+  """
   fn same_asset(a : FinanceAsset.Asset, b : FinanceAsset.Asset) : Bool do
     FinanceAsset.asset_id(a) == FinanceAsset.asset_id(b) && FinanceAsset.precision(a) == FinanceAsset.precision(b)
   end
-  doc "Require unique account IDs across the entire chart, not just adjacent entries."
+  doc """
+  Return whether all accounts have distinct IDs, including nonadjacent duplicates. Empty
+  chart is valid. Does not merge duplicate definitions or validate postings.
+  """
   fn unique_ids(accounts : List(Account)) : Bool do
     match accounts do
       Nil -> true

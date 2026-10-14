@@ -1,7 +1,20 @@
+-- LedgerValidation — Accounting validation against a fixed account chart without modifying
+-- journal history. Per-asset debit/credit conservation is checked exactly. Validation
+-- neither reserves replay keys nor provides authorization.
+--
+-- Usage and tested examples: docs/guide.md and test/docs_quickstart_test.march.
+
 mod LedgerValidation do
+  -- Opaque immutable draft that passed chart validation. Not bound to a journal identity or
+  -- replay state; post_validated rechecks its destination.
   opaque type Validated = ValidatedValue(LedgerEntry.Draft)
 
-  doc "Validate a draft against an account chart without posting or reserving IDs."
+  doc """
+  Validate d against accounts and return Validated. DuplicateAccount for duplicate chart
+  IDs; EmptyEntry for fewer than two postings; UnknownAccount or AssetMismatch for invalid
+  destinations; Unbalanced when any asset's signed atom total is nonzero. Does not reserve
+  or check replay IDs.
+  """
   fn validate(accounts : List(LedgerAccount.Account), d : LedgerEntry.Draft) : Result(Validated, LedgerError.Error) do
     let ps = LedgerEntry.postings(d)
     if !LedgerAccount.unique_ids(accounts) do Err(LedgerError.DuplicateAccount)
@@ -24,7 +37,10 @@ mod LedgerValidation do
     end end
   end
 
-  doc "Return an immutable draft copy; edits require validation again."
+  doc """
+  Return the immutable draft inside v. Infallible; deriving an edited draft does not
+  change v and the edited value must be validated again.
+  """
   fn draft(v : Validated) : LedgerEntry.Draft do
     match v do ValidatedValue(d) -> d end
   end
