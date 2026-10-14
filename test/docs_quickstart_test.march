@@ -1,0 +1,29 @@
+mod LedgerQuickstart do
+  needs IO.Clock, IO.Process
+
+  fn example() : Result(String, LedgerError.Error) do
+    let usd = Result.unwrap(FinanceAsset.fiat("USD", 2))
+    let metadata = Result.unwrap(FinanceMetadata.make("manual", 100, 101, Some("funding-1")))
+    let? cash = LedgerAccount.make("cash", LedgerAccount.AssetAccount, usd)
+    let? equity = LedgerAccount.make("equity", LedgerAccount.EquityAccount, usd)
+    let? journal = LedgerJournal.new([cash, equity])
+    let quantity = FinanceAmount.from_atoms(usd, BigInt.from_int(1250))
+    let? debit = LedgerEntry.posting("cash", LedgerEntry.Debit, quantity)
+    let? credit = LedgerEntry.posting("equity", LedgerEntry.Credit, quantity)
+    let? empty = LedgerEntry.draft("opening-1", metadata)
+    let draft = LedgerEntry.add(LedgerEntry.add(empty, debit), credit)
+    let? (posted_journal, original) = LedgerJournal.post(journal, draft)
+    let? (retried, _) = LedgerJournal.post(posted_journal, draft)
+    let undo_metadata = Result.unwrap(FinanceMetadata.make("manual", 102, 103, Some("undo-1")))
+    let? (reversed, _) = LedgerJournal.reverse(retried, original, "reversal-1", undo_metadata)
+    let? balance = LedgerJournal.balance(reversed, "cash")
+    Ok(FinanceAmount.format(balance))
+  end
+
+  test "documented posting retry and reversal" do
+    assert (match example() do
+      Ok(value) -> value == "0.00"
+      Err(_) -> false
+    end)
+  end
+end
