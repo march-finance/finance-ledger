@@ -1,0 +1,24 @@
+mod LedgerDuplicateAccountsTest do
+  pfn expect(r : Result(a, e)) : a do
+    match r do
+      Ok(v) -> v
+      Err(_) -> panic("unexpected duplicate account test error")
+    end
+  end
+  test "non-adjacent duplicate account IDs are rejected by construction and validation" do
+    let asset = expect(FinanceAsset.fiat("USD", 2))
+    let cash = expect(LedgerAccount.make("cash", LedgerAccount.AssetAccount, asset))
+    let equity = expect(LedgerAccount.make("equity", LedgerAccount.EquityAccount, asset))
+    let chart = [cash, equity, cash, equity]
+    assert (match LedgerJournal.new(chart) do
+      Err(LedgerError.DuplicateAccount) -> true
+      _ -> false
+    end)
+    let m = expect(FinanceMetadata.make("test", 1, 1, None))
+    let d = expect(LedgerEntry.draft("entry", m))
+    assert (match LedgerValidation.validate(chart, d) do
+      Err(LedgerError.DuplicateAccount) -> true
+      _ -> false
+    end)
+  end
+end

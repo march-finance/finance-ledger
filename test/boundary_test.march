@@ -1,0 +1,98 @@
+mod LedgerBoundaryTest do
+  needs IO.Clock, IO.Process
+  pfn expect(value : Result(a, e)) : a do
+    match value do
+      Ok(v) -> v
+      Err(_) -> panic("unexpected boundary error")
+    end
+  end
+  pfn usd() do expect(FinanceAsset.fiat("USD", 2)) end
+  pfn journal() do
+    expect(LedgerJournal.new([
+      expect(LedgerAccount.make("cash", LedgerAccount.AssetAccount, usd())),
+      expect(LedgerAccount.make("equity", LedgerAccount.EquityAccount, usd()))]))
+  end
+  pfn entry(id : String, amount : FinanceAmount.Quantity, m : FinanceMetadata.Metadata) do
+    let d = expect(LedgerEntry.draft(id, m))
+    LedgerEntry.add(LedgerEntry.add(d,
+      expect(LedgerEntry.posting("cash", LedgerEntry.Debit, amount))),
+      expect(LedgerEntry.posting("equity", LedgerEntry.Credit, amount)))
+  end
+  pfn metadata() do expect(FinanceMetadata.make("boundary", 100, 101, None)) end
+
+  test "zero and malformed identifiers are rejected at construction" do
+    assert (match LedgerEntry.posting("cash", LedgerEntry.Debit, FinanceAmount.from_atoms(usd(), BigInt.zero())) do
+      Err(LedgerError.InvalidAmount) -> true
+      _ -> false
+    end)
+    assert (match LedgerAccount.make("bad id", LedgerAccount.AssetAccount, usd()) do
+      Err(LedgerError.InvalidId) -> true
+      _ -> false
+    end)
+    assert (match LedgerEntry.draft("", metadata()) do
+      Err(LedgerError.InvalidId) -> true
+      _ -> false
+    end)
+    assert (match LedgerEntry.posting("bad\tid", LedgerEntry.Debit, FinanceAmount.from_atoms(usd(), BigInt.one())) do
+      Err(LedgerError.InvalidId) -> true
+      _ -> false
+    end)
+  end
+
+  test "arbitrary precision amounts remain exact through posting and reversal" do
+    let q = expect(FinanceAmount.parse(usd(), "123456789012345678901234567890.12"))
+    let (l, p) = expect(LedgerJournal.post(journal(), entry("huge", q, metadata())))
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(l, "cash"))) == "123456789012345678901234567890.12")
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(l, "equity"))) == "-123456789012345678901234567890.12")
+    let (reversed, _) = expect(LedgerJournal.reverse(l, p, "undo", metadata()))
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(reversed, "cash"))) == "0.00")
+  end
+
+  test "same ID without external key rejects changed recorded time and direction" do
+    let q = FinanceAmount.from_atoms(usd(), BigInt.one())
+    let d = entry("first", q, metadata())
+    let (l, _) = expect(LedgerJournal.post(journal(), d))
+    let m = expect(FinanceMetadata.make("boundary", 100, 102, None))
+    assert (match LedgerJournal.post(l, entry("first", q, m)) do
+      Err(LedgerError.ReplayConflict) -> true
+      _ -> false
+    end)
+    let opposite = List.fold_left(LedgerEntry.postings(d), expect(LedgerEntry.draft("first", metadata())),
+      fn (acc, p) -> LedgerEntry.add(acc, LedgerEntry.opposite(p)))
+    assert (match LedgerJournal.post(l, opposite) do
+      Err(LedgerError.ReplayConflict) -> true
+      _ -> false
+    end)
+  end
+
+  test "reversal conflicts cannot overwrite another entry or change history" do
+    let q = FinanceAmount.from_atoms(usd(), BigInt.one())
+    let (l, first) = expect(LedgerJournal.post(journal(), entry("first", q, metadata())))
+    let (two, _) = expect(LedgerJournal.post(l, entry("second", q, metadata())))
+    assert (match LedgerJournal.reverse(two, first, "second", metadata()) do
+      Err(LedgerError.ReplayConflict) -> true
+      _ -> false
+    end)
+    assert (LedgerJournal.count(two) == 2)
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(two, "cash"))) == "0.02")
+    let (undo, reversed) = expect(LedgerJournal.reverse(two, first, "undo", metadata()))
+    let (redo, _) = expect(LedgerJournal.reverse(undo, reversed, "redo", metadata()))
+    assert (LedgerJournal.count(redo) == 4)
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(redo, "cash"))) == "0.02")
+  end
+
+  test "generated sequences conserve atoms across every account" do
+    Check.all(Gen.list(Gen.int(1, 10000)), fn amounts ->
+      let initial = journal()
+      let state = List.fold_left(amounts, (initial, 0, 0), fn (state, n) ->
+        let (l, index, total) = state
+        let q = FinanceAmount.from_atoms(usd(), BigInt.from_int(n))
+        let (next, _) = expect(LedgerJournal.post(l, entry(int_to_string(index), q, metadata())))
+        (next, index + 1, total + n))
+      let (l, count, total) = state
+      let debit = FinanceAmount.atoms(expect(LedgerJournal.balance(l, "cash")))
+      let credit = FinanceAmount.atoms(expect(LedgerJournal.balance(l, "equity")))
+      LedgerJournal.count(initial) == 0 && LedgerJournal.count(l) == count &&
+        BigInt.eq(debit, BigInt.from_int(total)) && BigInt.is_zero(BigInt.add(debit, credit)))
+  end
+end

@@ -1,0 +1,31 @@
+mod LedgerValidation do
+  opaque type Validated = ValidatedValue(LedgerEntry.Draft)
+
+  doc "Validate a draft against an account chart without posting or reserving IDs."
+  fn validate(accounts : List(LedgerAccount.Account), d : LedgerEntry.Draft) : Result(Validated, LedgerError.Error) do
+    let ps = LedgerEntry.postings(d)
+    if !LedgerAccount.unique_ids(accounts) do Err(LedgerError.DuplicateAccount)
+    else if List.length(ps) < 2 do Err(LedgerError.EmptyEntry) else
+      let? _ = Result.collect(List.map(ps, fn p ->
+        match List.find(accounts, fn a -> LedgerAccount.id(a) == LedgerEntry.account(p)) do
+          None -> Err(LedgerError.UnknownAccount)
+          Some(a) ->
+            if LedgerAccount.same_asset(LedgerAccount.asset(a), FinanceAmount.quantity_asset(LedgerEntry.quantity(p))) do Ok(())
+            else Err(LedgerError.AssetMismatch) end
+        end))
+      let balanced = List.all(ps, fn p ->
+        let asset = FinanceAmount.quantity_asset(LedgerEntry.quantity(p))
+        let total = List.fold_left(ps, BigInt.zero(), fn (total, q) ->
+          if LedgerAccount.same_asset(asset, FinanceAmount.quantity_asset(LedgerEntry.quantity(q))) do
+            BigInt.add(total, LedgerEntry.signed_atoms(q))
+          else total end)
+        BigInt.is_zero(total))
+      if balanced do Ok(ValidatedValue(d)) else Err(LedgerError.Unbalanced) end
+    end end
+  end
+
+  doc "Return an immutable draft copy; edits require validation again."
+  fn draft(v : Validated) : LedgerEntry.Draft do
+    match v do ValidatedValue(d) -> d end
+  end
+end

@@ -1,0 +1,3 @@
+mod ForgedValidated do
+  fn forge(d : LedgerEntry.Draft) do LedgerValidation.ValidatedValue(d) end
+end

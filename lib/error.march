@@ -1,0 +1,3 @@
+mod LedgerError do
+  type Error = InvalidId | DuplicateAccount | UnknownAccount | AssetMismatch | InvalidAmount | EmptyEntry | Unbalanced | ReplayConflict | UnknownEntry | AlreadyReversed
+end

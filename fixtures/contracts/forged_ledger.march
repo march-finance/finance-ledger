@@ -1,0 +1,3 @@
+mod ForgedLedger do
+  fn forge() do LedgerJournal.LedgerValue(Nil, Nil) end
+end

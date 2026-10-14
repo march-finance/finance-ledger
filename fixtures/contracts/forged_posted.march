@@ -1,0 +1,3 @@
+mod ForgedPosted do
+  fn forge(d : LedgerEntry.Draft) do LedgerJournal.PostedValue(d, None) end
+end

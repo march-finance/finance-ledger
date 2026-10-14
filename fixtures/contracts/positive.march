@@ -1,0 +1,6 @@
+mod ValidLifecycle do
+  fn check(l : LedgerJournal.Ledger, d : LedgerEntry.Draft) do
+    let? v = LedgerJournal.validate(l, d)
+    LedgerJournal.post_validated(l, v)
+  end
+end

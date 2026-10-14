@@ -1,0 +1,89 @@
+mod LedgerJournal do
+  opaque type PostedEntry = PostedValue(LedgerEntry.Draft, Option(String))
+  opaque type Ledger = LedgerValue(List(LedgerAccount.Account), List(PostedEntry))
+
+  fn new(accounts : List(LedgerAccount.Account)) : Result(Ledger, LedgerError.Error) do
+    if !LedgerAccount.unique_ids(accounts) do Err(LedgerError.DuplicateAccount)
+    else Ok(LedgerValue(accounts, Nil)) end
+  end
+  fn entries(l : Ledger) : List(PostedEntry) do
+    match l do LedgerValue(_, es) -> es end
+  end
+  fn accounts(l : Ledger) : List(LedgerAccount.Account) do
+    match l do LedgerValue(accts, _) -> accts end
+  end
+  fn count(l : Ledger) : {Int | _ >= 0} do
+    let n = List.length(entries(l))
+    if n < 0 do panic("invalid journal length") else n end
+  end
+  fn entry_id(p : PostedEntry) : String do
+    match p do PostedValue(d, _) -> LedgerEntry.id(d) end
+  end
+  fn draft(p : PostedEntry) : LedgerEntry.Draft do
+    match p do PostedValue(d, _) -> d end
+  end
+  fn reversal_of(p : PostedEntry) : Option(String) do
+    match p do PostedValue(_, link) -> link end
+  end
+
+  doc "Check accounting invariants without posting or reserving replay keys."
+  fn validate(l : Ledger, d : LedgerEntry.Draft) : Result(LedgerValidation.Validated, LedgerError.Error) do
+    LedgerValidation.validate(accounts(l), d)
+  end
+
+  pfn same_event(a : LedgerEntry.Draft, b : LedgerEntry.Draft) : Bool do
+    let ma = LedgerEntry.metadata(a)
+    let mb = LedgerEntry.metadata(b)
+    match (FinanceMetadata.external_id(ma), FinanceMetadata.external_id(mb)) do
+      (Some(x), Some(y)) -> x == y && FinanceMetadata.source(ma) == FinanceMetadata.source(mb)
+      _ -> false
+    end
+  end
+
+  pfn append(l : Ledger, d : LedgerEntry.Draft, link : Option(String)) : Result((Ledger, PostedEntry), LedgerError.Error) do
+    let existing = List.filter(entries(l), fn p -> entry_id(p) == LedgerEntry.id(d) || same_event(draft(p), d))
+    match existing do
+      Cons(p, rest) ->
+        if List.is_empty(rest) && LedgerEntry.same(draft(p), d) && reversal_of(p) == link do Ok((l, p))
+        else Err(LedgerError.ReplayConflict) end
+      Nil ->
+        let? _ = validate(l, d)
+        let p = PostedValue(d, link)
+        Ok((LedgerValue(accounts(l), List.append(entries(l), [p])), p))
+    end
+  end
+
+  fn post(l : Ledger, d : LedgerEntry.Draft) : Result((Ledger, PostedEntry), LedgerError.Error) do append(l, d, None) end
+
+  doc "Post a validated draft, rechecking destination accounts and current replay keys."
+  fn post_validated(l : Ledger, v : LedgerValidation.Validated) : Result((Ledger, PostedEntry), LedgerError.Error) do
+    append(l, LedgerValidation.draft(v), None)
+  end
+
+  fn balance(l : Ledger, id : String) : Result(FinanceAmount.Quantity, LedgerError.Error) do
+    match List.find(accounts(l), fn a -> LedgerAccount.id(a) == id) do
+      None -> Err(LedgerError.UnknownAccount)
+      Some(a) ->
+        let ps = List.flat_map(entries(l), fn p -> LedgerEntry.postings(draft(p)))
+        let total = List.fold_left(ps, BigInt.zero(), fn (total, p) ->
+          if LedgerEntry.account(p) == id do BigInt.add(total, LedgerEntry.signed_atoms(p)) else total end)
+        Ok(FinanceAmount.from_atoms(LedgerAccount.asset(a), total))
+    end
+  end
+
+  fn reverse(l : Ledger, original : PostedEntry, id : String, metadata : FinanceMetadata.Metadata) : Result((Ledger, PostedEntry), LedgerError.Error) do
+    match List.find(entries(l), fn p -> entry_id(p) == entry_id(original)) do
+      None -> Err(LedgerError.UnknownEntry)
+      Some(found) ->
+        if !LedgerEntry.same(draft(found), draft(original)) || reversal_of(found) != reversal_of(original) do Err(LedgerError.UnknownEntry) else
+          let? empty = LedgerEntry.draft(id, metadata)
+          let d = List.fold_left(LedgerEntry.postings(draft(found)), empty, fn (d, p) -> LedgerEntry.add(d, LedgerEntry.opposite(p)))
+          let previous = List.find(entries(l), fn p -> reversal_of(p) == Some(entry_id(found)))
+          match previous do
+            Some(p) -> if entry_id(p) == id && LedgerEntry.same(draft(p), d) do Ok((l, p)) else Err(LedgerError.AlreadyReversed) end
+            None -> append(l, d, Some(entry_id(found)))
+          end
+        end
+    end
+  end
+end

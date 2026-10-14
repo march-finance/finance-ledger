@@ -1,0 +1,3 @@
+mod UnvalidatedPost do
+  fn bypass(l : LedgerJournal.Ledger, d : LedgerEntry.Draft) do LedgerJournal.post_validated(l, d) end
+end

@@ -1,0 +1,31 @@
+mod LedgerAccount do
+  type Kind = AssetAccount | LiabilityAccount | EquityAccount | IncomeAccount | ExpenseAccount
+  opaque type Account = AccountValue(String, Kind, FinanceAsset.Asset)
+
+  fn valid_id(id : String) : Bool do
+    !String.is_empty(id) && !List.any(string_chars(id), fn c -> c <= " ")
+  end
+
+  fn make(id : String, kind : Kind, asset : FinanceAsset.Asset) : Result(Account, LedgerError.Error) do
+    if valid_id(id) do Ok(AccountValue(id, kind, asset)) else Err(LedgerError.InvalidId) end
+  end
+  fn id(a : Account) : String do
+    match a do AccountValue(id, _, _) -> id end
+  end
+  fn kind(a : Account) : Kind do
+    match a do AccountValue(_, kind, _) -> kind end
+  end
+  fn asset(a : Account) : FinanceAsset.Asset do
+    match a do AccountValue(_, _, asset) -> asset end
+  end
+  fn same_asset(a : FinanceAsset.Asset, b : FinanceAsset.Asset) : Bool do
+    FinanceAsset.asset_id(a) == FinanceAsset.asset_id(b) && FinanceAsset.precision(a) == FinanceAsset.precision(b)
+  end
+  doc "Require unique account IDs across the entire chart, not just adjacent entries."
+  fn unique_ids(accounts : List(Account)) : Bool do
+    match accounts do
+      Nil -> true
+      Cons(a, rest) -> !List.any(rest, fn b -> id(a) == id(b)) && unique_ids(rest)
+    end
+  end
+end

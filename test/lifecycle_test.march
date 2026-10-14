@@ -1,0 +1,127 @@
+mod LedgerLifecycleTest do
+  needs IO.Clock, IO.Process
+
+  pfn expect(value : Result(a, e)) : a do
+    match value do
+      Ok(v) -> v
+      Err(_) -> panic("unexpected lifecycle error")
+    end
+  end
+  pfn usd() do expect(FinanceAsset.fiat("USD", 2)) end
+  pfn journal(asset : FinanceAsset.Asset) do
+    expect(LedgerJournal.new([
+      expect(LedgerAccount.make("cash", LedgerAccount.AssetAccount, asset)),
+      expect(LedgerAccount.make("equity", LedgerAccount.EquityAccount, asset))]))
+  end
+  pfn entry(id : String, n : Int) do
+    let m = expect(FinanceMetadata.make("lifecycle", 100, 101, None))
+    let d = expect(LedgerEntry.draft(id, m))
+    let q = FinanceAmount.from_atoms(usd(), BigInt.from_int(n))
+    LedgerEntry.add(LedgerEntry.add(d,
+      expect(LedgerEntry.posting("cash", LedgerEntry.Debit, q))),
+      expect(LedgerEntry.posting("equity", LedgerEntry.Credit, q)))
+  end
+
+  test "explicit validation does not post and preserves the draft" do
+    let l = journal(usd())
+    let d = entry("entry", 125)
+    let validated = expect(LedgerJournal.validate(l, d))
+    assert (LedgerEntry.id(LedgerValidation.draft(validated)) == "entry")
+    assert (LedgerJournal.count(l) == 0)
+    let (posted, p) = expect(LedgerJournal.post_validated(l, validated))
+    assert (LedgerJournal.entry_id(p) == "entry")
+    assert (LedgerJournal.count(posted) == 1)
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(posted, "cash"))) == "1.25")
+  end
+
+  test "validated entries are rechecked against destination account assets" do
+    let validated = expect(LedgerJournal.validate(journal(usd()), entry("entry", 1)))
+    let eur = expect(FinanceAsset.fiat("EUR", 2))
+    assert (match LedgerJournal.post_validated(journal(eur), validated) do
+      Err(LedgerError.AssetMismatch) -> true
+      _ -> false
+    end)
+    let empty = expect(LedgerJournal.new(Nil))
+    assert (match LedgerJournal.post_validated(empty, validated) do
+      Err(LedgerError.UnknownAccount) -> true
+      _ -> false
+    end)
+  end
+
+  test "validation does not reserve an ID or bypass later conflicts" do
+    let l = journal(usd())
+    let validated = expect(LedgerJournal.validate(l, entry("entry", 1)))
+    let (changed, _) = expect(LedgerJournal.post(l, entry("entry", 2)))
+    assert (match LedgerJournal.post_validated(changed, validated) do
+      Err(LedgerError.ReplayConflict) -> true
+      _ -> false
+    end)
+    let (first, _) = expect(LedgerJournal.post_validated(l, validated))
+    let (retry, _) = expect(LedgerJournal.post_validated(first, validated))
+    assert (LedgerJournal.count(retry) == 1)
+  end
+
+  test "unbalanced drafts cannot become validated entries" do
+    let d = entry("entry", 2)
+    let extra = expect(LedgerEntry.posting("cash", LedgerEntry.Debit, FinanceAmount.from_atoms(usd(), BigInt.one())))
+    assert (match LedgerJournal.validate(journal(usd()), LedgerEntry.add(d, extra)) do
+      Err(LedgerError.Unbalanced) -> true
+      _ -> false
+    end)
+  end
+
+  test "generated explicit posting agrees with convenience posting" do
+    Check.all(Gen.int(1, 1000000), fn n ->
+      let l = journal(usd())
+      let d = entry("entry", n)
+      let v = expect(LedgerJournal.validate(l, d))
+      let (explicit, _) = expect(LedgerJournal.post_validated(l, v))
+      let (direct, _) = expect(LedgerJournal.post(l, d))
+      BigInt.eq(FinanceAmount.atoms(expect(LedgerJournal.balance(explicit, "cash"))),
+        FinanceAmount.atoms(expect(LedgerJournal.balance(direct, "cash")))))
+  end
+
+  test "editing a recovered draft does not mutate its validated value" do
+    let l = journal(usd())
+    let v = expect(LedgerJournal.validate(l, entry("entry", 125)))
+    let extra = expect(LedgerEntry.posting("cash", LedgerEntry.Debit, FinanceAmount.from_atoms(usd(), BigInt.one())))
+    let changed = LedgerEntry.add(LedgerValidation.draft(v), extra)
+    assert (match LedgerJournal.validate(l, changed) do
+      Err(LedgerError.Unbalanced) -> true
+      _ -> false
+    end)
+    let (posted, _) = expect(LedgerJournal.post_validated(l, v))
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(posted, "cash"))) == "1.25")
+  end
+
+  test "direct validation rejects ambiguous duplicate account charts" do
+    let a = expect(LedgerAccount.make("cash", LedgerAccount.AssetAccount, usd()))
+    assert (match LedgerValidation.validate([a, a], entry("entry", 1)) do
+      Err(LedgerError.DuplicateAccount) -> true
+      _ -> false
+    end)
+  end
+
+  test "the same asset ID at different precisions never nets across groups" do
+    let fine = expect(FinanceAsset.fiat("USD", 3))
+    let accts = List.map([("coarse-a", usd()), ("coarse-b", usd()), ("fine-a", fine), ("fine-b", fine)], fn pair ->
+      let (id, asset) = pair
+      expect(LedgerAccount.make(id, LedgerAccount.AssetAccount, asset)))
+    let l = expect(LedgerJournal.new(accts))
+    let m = expect(FinanceMetadata.make("precision", 100, 101, None))
+    let d = expect(LedgerEntry.draft("precision", m))
+    let a = expect(LedgerEntry.posting("coarse-a", LedgerEntry.Debit, FinanceAmount.from_atoms(usd(), BigInt.one())))
+    let b = expect(LedgerEntry.posting("fine-a", LedgerEntry.Credit, FinanceAmount.from_atoms(fine, BigInt.one())))
+    let partial = LedgerEntry.add(LedgerEntry.add(d, a), b)
+    assert (match LedgerJournal.validate(l, partial) do
+      Err(LedgerError.Unbalanced) -> true
+      _ -> false
+    end)
+    let c = expect(LedgerEntry.posting("coarse-b", LedgerEntry.Credit, FinanceAmount.from_atoms(usd(), BigInt.one())))
+    let e = expect(LedgerEntry.posting("fine-b", LedgerEntry.Debit, FinanceAmount.from_atoms(fine, BigInt.one())))
+    let v = expect(LedgerJournal.validate(l, LedgerEntry.add(LedgerEntry.add(partial, c), e)))
+    let (posted, _) = expect(LedgerJournal.post_validated(l, v))
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(posted, "coarse-a"))) == "0.01")
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(posted, "fine-a"))) == "-0.001")
+  end
+end

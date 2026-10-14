@@ -1,0 +1,10 @@
+[package]
+name = "finance-ledger"
+version = "0.1.0"
+type = "lib"
+description = "Exact immutable double-entry accounting for March"
+author = ""
+license = "MIT"
+
+[deps]
+finance-core = { path = "../finance-core" }

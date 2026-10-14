@@ -1,0 +1,70 @@
+mod LedgerEntry do
+  type Direction = Debit | Credit
+  derive Eq for Direction
+  opaque type Posting = PostingValue(String, Direction, FinanceAmount.Quantity)
+  opaque type Draft = DraftValue(String, FinanceMetadata.Metadata, List(Posting))
+
+  fn posting(account : String, direction : Direction, quantity : FinanceAmount.Quantity) : Result(Posting, LedgerError.Error) do
+    if !LedgerAccount.valid_id(account) do Err(LedgerError.InvalidId)
+    else if BigInt.compare(FinanceAmount.atoms(quantity), BigInt.zero()) <= 0 do Err(LedgerError.InvalidAmount)
+    else Ok(PostingValue(account, direction, quantity)) end end
+  end
+  fn account(p : Posting) : String do
+    match p do PostingValue(id, _, _) -> id end
+  end
+  fn direction(p : Posting) : Direction do
+    match p do PostingValue(_, d, _) -> d end
+  end
+  fn quantity(p : Posting) : FinanceAmount.Quantity do
+    match p do PostingValue(_, _, q) -> q end
+  end
+  fn signed_atoms(p : Posting) : BigInt.BigInt do
+    match direction(p) do
+      Debit -> FinanceAmount.atoms(quantity(p))
+      Credit -> BigInt.negate(FinanceAmount.atoms(quantity(p)))
+    end
+  end
+  fn opposite(p : Posting) : Posting do
+    let id = account(p)
+    let d = direction(p)
+    let q = quantity(p)
+    let opposite = match d do
+      Debit -> Credit
+      Credit -> Debit
+    end
+    PostingValue(id, opposite, q)
+  end
+  fn draft(id : String, metadata : FinanceMetadata.Metadata) : Result(Draft, LedgerError.Error) do
+    if LedgerAccount.valid_id(id) do Ok(DraftValue(id, metadata, Nil)) else Err(LedgerError.InvalidId) end
+  end
+  fn add(d : Draft, p : Posting) : Draft do
+    let id = id(d)
+    let m = metadata(d)
+    let ps = postings(d)
+    DraftValue(id, m, List.append(ps, [p]))
+  end
+  fn id(d : Draft) : String do
+    match d do DraftValue(id, _, _) -> id end
+  end
+  fn metadata(d : Draft) : FinanceMetadata.Metadata do
+    match d do DraftValue(_, m, _) -> m end
+  end
+  fn postings(d : Draft) : List(Posting) do
+    match d do DraftValue(_, _, ps) -> ps end
+  end
+
+  fn same(a : Draft, b : Draft) : Bool do
+    let ma = metadata(a)
+    let mb = metadata(b)
+    FinanceMetadata.source(ma) == FinanceMetadata.source(mb) &&
+      FinanceMetadata.effective(ma) == FinanceMetadata.effective(mb) &&
+      FinanceMetadata.recorded(ma) == FinanceMetadata.recorded(mb) &&
+      FinanceMetadata.external_id(ma) == FinanceMetadata.external_id(mb) &&
+      List.length(postings(a)) == List.length(postings(b)) &&
+      List.all(List.zip(postings(a), postings(b)), fn pair ->
+        let (x, y) = pair
+        account(x) == account(y) && direction(x) == direction(y) &&
+          LedgerAccount.same_asset(FinanceAmount.quantity_asset(quantity(x)), FinanceAmount.quantity_asset(quantity(y))) &&
+          BigInt.eq(FinanceAmount.atoms(quantity(x)), FinanceAmount.atoms(quantity(y))))
+  end
+end

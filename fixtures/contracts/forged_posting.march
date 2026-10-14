@@ -1,0 +1,3 @@
+mod ForgedPosting do
+  fn forge(q : FinanceAmount.Quantity) do LedgerEntry.PostingValue("cash", LedgerEntry.Debit, q) end
+end

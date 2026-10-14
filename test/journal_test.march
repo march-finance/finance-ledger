@@ -1,0 +1,150 @@
+mod LedgerJournalTest do
+  needs IO.Clock, IO.Process
+
+  pfn expect(value : Result(a, e)) : a do
+    match value do
+      Ok(v) -> v
+      Err(_) -> panic("unexpected ledger error")
+    end
+  end
+
+  pfn usd() do expect(FinanceAsset.fiat("USD", 2)) end
+  pfn meta() do expect(FinanceMetadata.make("test", 100, 101, Some("event-1"))) end
+
+  pfn ledger() do
+    let cash = expect(LedgerAccount.make("cash", LedgerAccount.AssetAccount, usd()))
+    let equity = expect(LedgerAccount.make("equity", LedgerAccount.EquityAccount, usd()))
+    expect(LedgerJournal.new([cash, equity]))
+  end
+
+  pfn entry(n : Int) do
+    let q = FinanceAmount.from_atoms(usd(), BigInt.from_int(n))
+    let debit = expect(LedgerEntry.posting("cash", LedgerEntry.Debit, q))
+    let credit = expect(LedgerEntry.posting("equity", LedgerEntry.Credit, q))
+    let draft = expect(LedgerEntry.draft("entry-1", meta()))
+    LedgerEntry.add(LedgerEntry.add(draft, debit), credit)
+  end
+
+  test "balanced entry posts and projects exact account balances" do
+    let (journal, posted) = expect(LedgerJournal.post(ledger(), entry(123)))
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(journal, "cash"))) == "1.23")
+    assert (LedgerJournal.entry_id(posted) == "entry-1")
+  end
+
+  test "same external event is idempotent and conflicting amounts fail" do
+    let (journal, _) = expect(LedgerJournal.post(ledger(), entry(123)))
+    let (replayed, _) = expect(LedgerJournal.post(journal, entry(123)))
+    assert (LedgerJournal.count(replayed) == 1)
+    assert (Result.is_err(LedgerJournal.post(journal, entry(124))))
+  end
+
+  test "reversal compensates exactly and retains original" do
+    let (journal, posted) = expect(LedgerJournal.post(ledger(), entry(123)))
+    let reverse_meta = expect(FinanceMetadata.make("test", 102, 102, Some("reversal-1")))
+    let (reversed, _) = expect(LedgerJournal.reverse(journal, posted, "entry-2", reverse_meta))
+    assert (LedgerJournal.count(reversed) == 2)
+    assert (BigInt.is_zero(FinanceAmount.atoms(expect(LedgerJournal.balance(reversed, "cash")))))
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(journal, "cash"))) == "1.23")
+  end
+
+  test "generated balanced entries and reversals preserve conservation" do
+    Check.all(Gen.int(1, 1000000), fn n ->
+      let (journal, posted) = expect(LedgerJournal.post(ledger(), entry(n)))
+      let m = expect(FinanceMetadata.make("test", 102, 102, Some("reversal-1")))
+      let (reversed, _) = expect(LedgerJournal.reverse(journal, posted, "entry-2", m))
+      BigInt.is_zero(FinanceAmount.atoms(expect(LedgerJournal.balance(reversed, "cash")))))
+  end
+
+  test "unknown accounts empty entries and negative posting amounts fail" do
+    let draft = expect(LedgerEntry.draft("empty", meta()))
+    assert (Result.is_err(LedgerJournal.post(ledger(), draft)))
+    assert (Result.is_err(LedgerEntry.posting("cash", LedgerEntry.Debit, FinanceAmount.from_atoms(usd(), BigInt.from_int(-1)))))
+    let p = expect(LedgerEntry.posting("unknown", LedgerEntry.Debit, FinanceAmount.from_atoms(usd(), BigInt.one())))
+    let counter = expect(LedgerEntry.posting("equity", LedgerEntry.Credit, FinanceAmount.from_atoms(usd(), BigInt.one())))
+    assert (match LedgerJournal.post(ledger(), LedgerEntry.add(LedgerEntry.add(draft, p), counter)) do
+      Err(LedgerError.UnknownAccount) -> true
+      _ -> false
+    end)
+  end
+
+  test "unbalanced entries fail without changing the original journal" do
+    let original = ledger()
+    let d = expect(LedgerEntry.draft("bad", meta()))
+    let a = expect(LedgerEntry.posting("cash", LedgerEntry.Debit, FinanceAmount.from_atoms(usd(), BigInt.from_int(2))))
+    let b = expect(LedgerEntry.posting("equity", LedgerEntry.Credit, FinanceAmount.from_atoms(usd(), BigInt.one())))
+    assert (Result.is_err(LedgerJournal.post(original, LedgerEntry.add(LedgerEntry.add(d, a), b))))
+    assert (LedgerJournal.count(original) == 0)
+  end
+
+  test "precision mismatches and duplicate accounts fail" do
+    let cash = expect(LedgerAccount.make("cash", LedgerAccount.AssetAccount, usd()))
+    assert (Result.is_err(LedgerJournal.new([cash, cash])))
+    let wrong = expect(FinanceAsset.fiat("USD", 3))
+    let a = expect(LedgerEntry.posting("cash", LedgerEntry.Debit, FinanceAmount.from_atoms(wrong, BigInt.one())))
+    let b = expect(LedgerEntry.posting("equity", LedgerEntry.Credit, FinanceAmount.from_atoms(wrong, BigInt.one())))
+    let d = expect(LedgerEntry.draft("wrong", meta()))
+    assert (Result.is_err(LedgerJournal.post(ledger(), LedgerEntry.add(LedgerEntry.add(d, a), b))))
+  end
+
+  test "crypto trades need a clearing posting for each asset" do
+    let btc = expect(FinanceAsset.native("bitcoin", 8))
+    let accts = List.map([("btc", btc), ("btc-clearing", btc), ("usd", usd()), ("usd-clearing", usd())], fn pair ->
+      let (id, asset) = pair
+      expect(LedgerAccount.make(id, LedgerAccount.AssetAccount, asset)))
+    let journal = expect(LedgerJournal.new(accts))
+    let coin = expect(FinanceAmount.parse(btc, "0.01"))
+    let dollars = expect(FinanceAmount.parse(usd(), "600.00"))
+    let a = expect(LedgerEntry.posting("btc", LedgerEntry.Debit, coin))
+    let b = expect(LedgerEntry.posting("usd", LedgerEntry.Credit, dollars))
+    let empty = expect(LedgerEntry.draft("trade", meta()))
+    let incomplete = LedgerEntry.add(LedgerEntry.add(empty, a), b)
+    assert (Result.is_err(LedgerJournal.post(journal, incomplete)))
+    let c = expect(LedgerEntry.posting("btc-clearing", LedgerEntry.Credit, coin))
+    let d = expect(LedgerEntry.posting("usd-clearing", LedgerEntry.Debit, dollars))
+    let (posted, _) = expect(LedgerJournal.post(journal, LedgerEntry.add(LedgerEntry.add(incomplete, c), d)))
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(posted, "btc"))) == "0.01000000")
+    assert (FinanceAmount.format(expect(LedgerJournal.balance(posted, "usd"))) == "-600.00")
+  end
+
+  test "a reversal can be replayed but cannot be applied twice" do
+    let (journal, posted) = expect(LedgerJournal.post(ledger(), entry(123)))
+    let m = expect(FinanceMetadata.make("test", 102, 102, Some("reversal-1")))
+    let (reversed, reversal) = expect(LedgerJournal.reverse(journal, posted, "entry-2", m))
+    let (replayed, _) = expect(LedgerJournal.reverse(reversed, posted, "entry-2", m))
+    assert (LedgerJournal.count(replayed) == 2)
+    assert (LedgerJournal.reversal_of(reversal) == Some("entry-1"))
+    assert (Result.is_err(LedgerJournal.reverse(reversed, posted, "entry-3", m)))
+    assert (Result.is_err(LedgerJournal.reverse(ledger(), posted, "entry-2", m)))
+  end
+
+  test "generated repeated events never change balances or journal length" do
+    Check.all(Gen.int(1, 1000000), fn n ->
+      let (journal, _) = expect(LedgerJournal.post(ledger(), entry(n)))
+      let (replayed, _) = expect(LedgerJournal.post(journal, entry(n)))
+      LedgerJournal.count(replayed) == 1 &&
+        BigInt.eq(FinanceAmount.atoms(expect(LedgerJournal.balance(replayed, "cash"))), BigInt.from_int(n)))
+  end
+
+  pfn event(id : String, source : String, key : String, effective : Int) do
+    let m = expect(FinanceMetadata.make(source, effective, 101, Some(key)))
+    let d = expect(LedgerEntry.draft(id, m))
+    List.fold_left(LedgerEntry.postings(entry(123)), d, LedgerEntry.add)
+  end
+
+  test "external keys replay independently of entry IDs and are source scoped" do
+    let (journal, _) = expect(LedgerJournal.post(ledger(), event("first", "a", "key", 100)))
+    let (retry, original) = expect(LedgerJournal.post(journal, event("new-id", "a", "key", 100)))
+    assert (LedgerJournal.count(retry) == 1)
+    assert (LedgerJournal.entry_id(original) == "first")
+    let (second, _) = expect(LedgerJournal.post(retry, event("second", "b", "key", 100)))
+    assert (LedgerJournal.count(second) == 2)
+    assert (match LedgerJournal.post(second, event("first", "b", "key", 100)) do
+      Err(LedgerError.ReplayConflict) -> true
+      _ -> false
+    end)
+    assert (match LedgerJournal.post(journal, event("other", "a", "key", 99)) do
+      Err(LedgerError.ReplayConflict) -> true
+      _ -> false
+    end)
+  end
+end
